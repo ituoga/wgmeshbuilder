@@ -30,28 +30,28 @@ func (m *Mesh) Deploy() error {
 		}
 
 		config := m.generateConfigForNode(node)
+		routes := m.collectRoutesForNode(node)
 
 		currentConfig, err := wireguard.GetCurrentConfig(client, m.InterfaceName)
 		if err != nil {
-			fmt.Printf("  No existing config, will create fresh\n")
-			if err := wireguard.ApplyFullConfiguration(client, m.InterfaceName, config); err != nil {
+			fmt.Printf("  No existing config, applying fresh persistent configuration\n")
+			if err := wireguard.ApplyPersistentConfig(client, m.InterfaceName, config, routes); err != nil {
 				return fmt.Errorf("failed to apply config to %s: %w", hostname, err)
 			}
 		} else {
 			diff := wireguard.CalculateDiff(currentConfig, wireguard.FullConfigToConfig(config))
 			if diff.HasChanges() {
-				fmt.Printf("  Applying incremental changes...\n")
-				if err := wireguard.ApplyDiff(client, m.InterfaceName, diff); err != nil {
-					return fmt.Errorf("failed to apply diff to %s: %w", hostname, err)
+				fmt.Printf("  Applying changes with persistent configuration\n")
+				if err := wireguard.UpdatePersistentConfig(client, m.InterfaceName, config, routes, diff); err != nil {
+					return fmt.Errorf("failed to update config on %s: %w", hostname, err)
 				}
 			} else {
-				fmt.Printf("  No changes needed\n")
-			}
-		}
-
-		if len(node.RoutableNetworks) > 0 {
-			if err := ssh.UpdateRoutingTable(client, m.InterfaceName, node.RoutableNetworks); err != nil {
-				return fmt.Errorf("failed to update routes on %s: %w", hostname, err)
+				fmt.Printf("  No changes needed, ensuring persistent config is up to date\n")
+				configContent := wireguard.GenerateWgQuickConfig(config, routes)
+				configPath := fmt.Sprintf("/etc/wireguard/%s.conf", m.InterfaceName)
+				if err := client.WriteFile(configPath, []byte(configContent), 0600); err != nil {
+					fmt.Printf("  Warning: failed to update config file: %v\n", err)
+				}
 			}
 		}
 
@@ -93,6 +93,25 @@ func (m *Mesh) detectEndpoints() error {
 	return nil
 }
 
+func (m *Mesh) collectRoutesForNode(node *Node) []ssh.RouteEntry {
+	routes := make([]ssh.RouteEntry, 0)
+
+	for peerHostname, peer := range m.Nodes {
+		if peerHostname == node.Hostname {
+			continue
+		}
+
+		for _, network := range peer.RoutableNetworks {
+			routes = append(routes, ssh.RouteEntry{
+				Network: network,
+				Gateway: peer.MeshIP.String(),
+			})
+		}
+	}
+
+	return routes
+}
+
 func (m *Mesh) generateConfigForNode(node *Node) *WireGuardConfig {
 	config := &WireGuardConfig{
 		Interface: WGInterface{
@@ -123,9 +142,7 @@ func (m *Mesh) generateConfigForNode(node *Node) *WireGuardConfig {
 			peerConfig.Endpoint = peer.PublicEndpoint
 		}
 
-		if peer.BehindNAT || node.BehindNAT {
-			peerConfig.PersistentKeepalive = 25
-		}
+		peerConfig.PersistentKeepalive = 5
 
 		config.Peers = append(config.Peers, peerConfig)
 	}

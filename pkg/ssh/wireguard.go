@@ -61,3 +61,28 @@ func UpdateRoutingTable(client *Client, iface string, networks []string) error {
 
 	return nil
 }
+
+type RouteEntry struct {
+	Network string
+	Gateway string
+}
+
+func UpdateRoutingTableWithGateways(client *Client, iface string, routes []RouteEntry) error {
+	fmt.Printf("  Updating routing table with gateways...\n")
+
+	for _, route := range routes {
+		cmd := fmt.Sprintf("ip route add %s via %s dev %s || ip route replace %s via %s dev %s",
+			route.Network, route.Gateway, iface, route.Network, route.Gateway, iface)
+		if err := client.RunQuiet(cmd); err != nil {
+			return fmt.Errorf("failed to add route for %s via %s: %w", route.Network, route.Gateway, err)
+		}
+		fmt.Printf("    Added route: %s via %s\n", route.Network, route.Gateway)
+	}
+
+	cmd := "sysctl -w net.ipv4.ip_forward=1 > /dev/null"
+	if err := client.RunQuiet(cmd); err != nil {
+		return fmt.Errorf("failed to enable IP forwarding: %w", err)
+	}
+
+	return nil
+}

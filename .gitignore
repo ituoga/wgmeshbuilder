@@ -1,5 +1,6 @@
 # Binaries
 wgmesh
+wgmeshbuilder
 *.exe
 *.dll
 *.so

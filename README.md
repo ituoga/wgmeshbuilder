@@ -9,8 +9,9 @@ A Go-based tool for building and managing WireGuard mesh networks with support f
 - **SSH-Based Deployment**: Installs and configures WireGuard on remote Ubuntu hosts via SSH
 - **Incremental Updates**: Uses `wg set` commands for online configuration changes without restarting interfaces
 - **Key Management**: Generates and stores WireGuard key pairs locally for all nodes
-- **Routing Table Management**: Automatically configures routes for networks behind mesh nodes
+- **Routing Table Management**: Automatically configures routes for networks behind mesh nodes on all nodes
 - **Diff-Based Deployment**: Only applies configuration changes, minimizing disruption
+- **Persistent Configuration**: Uses systemd and wg-quick for automatic startup after reboot
 - **Persistent State**: Stores mesh configuration in JSON format
 
 ## Prerequisites
@@ -91,8 +92,12 @@ This will:
 2. Install WireGuard if not present
 3. Detect public endpoints and NAT status
 4. Generate or update WireGuard configuration
-5. Apply changes using `wg set` commands (if possible)
-6. Configure routing tables
+5. Write configuration to `/etc/wireguard/wg0.conf`
+6. Enable and start `wg-quick@wg0` systemd service
+7. Apply changes using `wg set` commands for online updates (when possible)
+8. Configure routing tables with routes to all mesh networks
+
+**Configuration persists across reboots** via systemd service.
 
 ### 5. Remove a node
 
@@ -148,16 +153,32 @@ node3 <----> node4
 - Nodes behind NAT use persistent keepalive to maintain connections
 - The tool detects NAT by comparing SSH host with detected public IP
 
+### Persistence Across Reboots
+
+The tool ensures configuration survives server reboots by:
+1. Writing WireGuard configuration to `/etc/wireguard/wg0.conf` (wg-quick format)
+2. Enabling the `wg-quick@wg0.service` systemd unit
+3. Including `PostUp` commands in the config to:
+   - Add routes for networks behind other mesh nodes (e.g., `ip route add 192.168.10.0/24 via 10.99.0.2`)
+   - Enable IP forwarding (`sysctl -w net.ipv4.ip_forward=1`)
+4. Including `PreDown` commands to clean up routes on shutdown
+
+When the server reboots, systemd automatically:
+- Brings up the WireGuard interface
+- Restores all peer connections
+- Re-applies all routing table entries
+
 ### Online Updates
 
 When deploying changes, the tool:
 1. Reads current WireGuard configuration using `wg show dump`
 2. Calculates differences between current and desired state
-3. Applies changes using `wg set` commands:
+3. Updates the persistent configuration file
+4. Applies changes using `wg set` commands for online updates:
    - Add new peers
    - Update existing peers
    - Remove old peers
-4. Only restarts the interface if fundamental changes are required
+5. Only restarts the interface if fundamental changes are required (e.g., IP address change)
 
 ### SSH Key Authentication
 
@@ -216,25 +237,61 @@ ssh root@node-address
 ssh root@node-address wg show
 ```
 
-### Check Interface Status
+### Check Persistence
 
 ```bash
+# Check if systemd service is enabled and running
+ssh root@node-address systemctl status wg-quick@wg0
+
+# View the persistent configuration file
+ssh root@node-address cat /etc/wireguard/wg0.conf
+
+# Check if service starts on boot
+ssh root@node-address systemctl is-enabled wg-quick@wg0
+```
+
+### Check Interface and Routes
+
+```bash
+# Check interface status
 ssh root@node-address ip addr show wg0
+
+# Check routing table
 ssh root@node-address ip route
+
+# Test connectivity through mesh
+ssh root@node-address ping -c 3 10.99.0.2
 ```
 
 ### View WireGuard Logs
 
 ```bash
-ssh root@node-address journalctl -u wg-quick@wg0
+# View systemd service logs
+ssh root@node-address journalctl -u wg-quick@wg0 -n 50
+
+# Follow logs in real-time
+ssh root@node-address journalctl -u wg-quick@wg0 -f
+```
+
+### Test Reboot Persistence
+
+```bash
+# Reboot a node
+ssh root@node-address reboot
+
+# Wait for reboot, then check if WireGuard came back up
+sleep 30
+ssh root@node-address wg show
+ssh root@node-address ip route | grep 192.168
 ```
 
 ### Rebuild Configuration
 
 If something goes wrong, you can force a fresh configuration:
 ```bash
-# On each node, remove the interface
-ssh root@node-address ip link del wg0
+# On each node, stop and disable the service
+ssh root@node-address systemctl stop wg-quick@wg0
+ssh root@node-address systemctl disable wg-quick@wg0
 
 # Then redeploy
 ./wgmesh -deploy
