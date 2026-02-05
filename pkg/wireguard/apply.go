@@ -1,0 +1,81 @@
+package wireguard
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/ituoga/wgmeshbuilder/pkg/ssh"
+)
+
+type FullConfig struct {
+	Interface WGInterface
+	Peers     []WGPeer
+}
+
+type WGInterface struct {
+	PrivateKey string
+	Address    string
+	ListenPort int
+}
+
+type WGPeer struct {
+	PublicKey           string
+	Endpoint            string
+	AllowedIPs          []string
+	PersistentKeepalive int
+}
+
+func ApplyFullConfiguration(client *ssh.Client, iface string, config *FullConfig) error {
+	fmt.Println("  Creating fresh WireGuard configuration...")
+
+	if _, err := client.Run(fmt.Sprintf("ip link del %s 2>/dev/null || true", iface)); err != nil {
+	}
+
+	if _, err := client.Run(fmt.Sprintf("ip link add %s type wireguard", iface)); err != nil {
+		return fmt.Errorf("failed to create interface: %w", err)
+	}
+
+	tmpKeyFile := fmt.Sprintf("/tmp/wg-key-%s", iface)
+	if err := client.WriteFile(tmpKeyFile, []byte(config.Interface.PrivateKey), 0600); err != nil {
+		return fmt.Errorf("failed to write private key: %w", err)
+	}
+	defer client.Run(fmt.Sprintf("rm -f %s", tmpKeyFile))
+
+	cmd := fmt.Sprintf("wg set %s private-key %s listen-port %d",
+		iface, tmpKeyFile, config.Interface.ListenPort)
+	if _, err := client.Run(cmd); err != nil {
+		return fmt.Errorf("failed to set interface config: %w", err)
+	}
+
+	if _, err := client.Run(fmt.Sprintf("ip addr add %s dev %s", config.Interface.Address, iface)); err != nil {
+		return fmt.Errorf("failed to set IP address: %w", err)
+	}
+
+	if _, err := client.Run(fmt.Sprintf("ip link set %s up", iface)); err != nil {
+		return fmt.Errorf("failed to bring interface up: %w", err)
+	}
+
+	for _, peer := range config.Peers {
+		peerCmd := fmt.Sprintf("wg set %s peer %s", iface, peer.PublicKey)
+
+		if peer.Endpoint != "" {
+			peerCmd += fmt.Sprintf(" endpoint %s", peer.Endpoint)
+		}
+
+		if len(peer.AllowedIPs) > 0 {
+			peerCmd += fmt.Sprintf(" allowed-ips %s", strings.Join(peer.AllowedIPs, ","))
+		}
+
+		if peer.PersistentKeepalive > 0 {
+			peerCmd += fmt.Sprintf(" persistent-keepalive %d", peer.PersistentKeepalive)
+		}
+
+		if _, err := client.Run(peerCmd); err != nil {
+			return fmt.Errorf("failed to add peer %s: %w", peer.PublicKey[:16], err)
+		}
+
+		fmt.Printf("    Added peer: %s\n", peer.PublicKey[:16])
+	}
+
+	return nil
+}
