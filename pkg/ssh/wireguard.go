@@ -14,8 +14,8 @@ func EnsureWireGuardInstalled(client *Client) error {
 	fmt.Println("  Installing WireGuard...")
 
 	commands := []string{
-		"apt-get update -qq",
-		"DEBIAN_FRONTEND=noninteractive apt-get install -y -qq wireguard wireguard-tools",
+		"apt update -qq",
+		"DEBIAN_FRONTEND=noninteractive apt install -y -qq wireguard wireguard-tools",
 		"modprobe wireguard || true",
 	}
 
