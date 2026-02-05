@@ -62,11 +62,6 @@ func UpdateRoutingTable(client *Client, iface string, networks []string) error {
 	return nil
 }
 
-type RouteEntry struct {
-	Network string
-	Gateway string
-}
-
 func UpdateRoutingTableWithGateways(client *Client, iface string, routes []RouteEntry) error {
 	fmt.Printf("  Updating routing table with gateways...\n")
 

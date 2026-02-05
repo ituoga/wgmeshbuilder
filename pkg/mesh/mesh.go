@@ -7,8 +7,15 @@ import (
 	"os"
 	"strings"
 
+	"github.com/ituoga/wgmeshbuilder/pkg/crypto"
 	"github.com/ituoga/wgmeshbuilder/pkg/wireguard"
 )
+
+var encryptionPassword string
+
+func SetEncryptionPassword(password string) {
+	encryptionPassword = password
+}
 
 func Initialize(stateFile string) error {
 	hostname, err := os.Hostname()
@@ -33,6 +40,16 @@ func Load(stateFile string) (*Mesh, error) {
 		return nil, fmt.Errorf("failed to read state file: %w", err)
 	}
 
+	// Check if file is encrypted (base64 encoded data)
+	if encryptionPassword != "" {
+		// Decrypt the data
+		decrypted, err := crypto.Decrypt(string(data), encryptionPassword)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt state file: %w", err)
+		}
+		data = decrypted
+	}
+
 	var m Mesh
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("failed to parse state file: %w", err)
@@ -45,6 +62,15 @@ func (m *Mesh) Save(stateFile string) error {
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal state: %w", err)
+	}
+
+	// Encrypt if password is set
+	if encryptionPassword != "" {
+		encrypted, err := crypto.Encrypt(data, encryptionPassword)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt state: %w", err)
+		}
+		data = []byte(encrypted)
 	}
 
 	if err := os.WriteFile(stateFile, data, 0600); err != nil {

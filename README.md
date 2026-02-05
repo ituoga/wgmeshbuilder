@@ -114,6 +114,49 @@ This will:
 ./wgmesh -state /path/to/custom-state.json -list
 ```
 
+### Encrypted State File
+
+Encrypt the mesh state file to protect private keys. The file will be AES-256-GCM encrypted and base64-encoded, making it safe to store in vaults.
+
+```bash
+# Initialize with encryption (asks for password twice)
+./wgmesh --encrypt -init
+Enter encryption password: ********
+Confirm password: ********
+
+# All operations require the password when using --encrypt
+./wgmesh --encrypt --add node1:10.99.0.1:192.168.1.10
+Enter encryption password: ********
+
+./wgmesh --encrypt --list
+Enter encryption password: ********
+
+./wgmesh --encrypt --deploy
+Enter encryption password: ********
+```
+
+**Encrypted file format:**
+```
+U2FsdGVkX1+Qq1RZNlBXMTJHVzR4TVRrMllXNWpaVzkxZEdWd0FsSnZibk5hY0dWaGRHbHZi...
+(base64-encoded encrypted data)
+```
+
+**Security features:**
+- AES-256-GCM authenticated encryption
+- PBKDF2 key derivation (100,000 iterations)
+- Random 32-byte salt per encryption
+- Base64-encoded output (vault-friendly)
+
+**Store in vault:**
+```bash
+# HashiCorp Vault
+vault kv put secret/wgmesh state=@mesh-state.json
+
+# Retrieve and use
+vault kv get -field=state secret/wgmesh > mesh-state.json
+./wgmesh --encrypt --list
+```
+
 ### Adding Routes for Networks Behind Nodes
 
 Edit the `mesh-state.json` file and add routable networks to a node:
@@ -131,7 +174,13 @@ Edit the `mesh-state.json` file and add routable networks to a node:
 }
 ```
 
-After editing, run `./wgmesh -deploy` to apply the changes. Other nodes in the mesh will automatically route traffic for `192.168.10.0/24` and `192.168.20.0/24` through node1.
+After editing, run `./wgmesh -deploy` to apply the changes.
+
+**What happens:**
+- `node1` gets direct routes: `ip route add 192.168.10.0/24 dev wg0` and `ip route add 192.168.20.0/24 dev wg0`
+- All other nodes get routes via node1's mesh IP: `ip route add 192.168.10.0/24 via 10.99.0.1 dev wg0`
+- Routes are added to both the live routing table and the persistent config file
+- If you remove a network from `routable_networks`, it will be automatically cleaned up from all nodes on the next deploy
 
 ## How It Works
 
@@ -168,17 +217,37 @@ When the server reboots, systemd automatically:
 - Restores all peer connections
 - Re-applies all routing table entries
 
+### Route Management and Cleanup
+
+The tool intelligently manages routing tables:
+
+1. **Reading Current Routes**: Uses `ip route show dev wg0` to get existing routes
+2. **Calculating Diff**: Compares current vs desired routes
+3. **Removing Stale Routes**: Automatically removes routes that are no longer in the mesh state
+4. **Adding New Routes**: Adds routes for newly configured networks
+5. **Persistence**: All routes are embedded in the config file via `PostUp` commands
+
+**Example scenario:**
+- You add `"routable_networks": ["192.168.10.0/24"]` to node1
+- Deploy: All nodes get route `192.168.10.0/24 via 10.99.0.1`
+- You remove that network from node1's config
+- Deploy: All nodes automatically remove the stale route
+
 ### Online Updates
 
 When deploying changes, the tool:
 1. Reads current WireGuard configuration using `wg show dump`
-2. Calculates differences between current and desired state
-3. Updates the persistent configuration file
-4. Applies changes using `wg set` commands for online updates:
+2. Reads current routing table using `ip route show`
+3. Calculates differences between current and desired state for both peers and routes
+4. Updates the persistent configuration file
+5. Applies changes using `wg set` commands for online updates:
    - Add new peers
    - Update existing peers
    - Remove old peers
-5. Only restarts the interface if fundamental changes are required (e.g., IP address change)
+6. Applies route changes using `ip route` commands:
+   - Remove stale routes
+   - Add new routes
+7. Only restarts the interface if fundamental changes are required (e.g., IP address change)
 
 ### SSH Key Authentication
 
@@ -220,10 +289,14 @@ The `mesh-state.json` file stores the complete mesh state:
 
 ## Security Considerations
 
-- Private keys are stored in `mesh-state.json` - protect this file with appropriate permissions
+- **Private keys in state file**: WireGuard private keys are stored in `mesh-state.json`
+  - Without encryption: Use file permissions (`chmod 600`) and secure storage
+  - With `--encrypt`: State file is AES-256-GCM encrypted and base64-encoded
+  - **Recommended**: Always use `--encrypt` flag for production deployments
+- **Password storage**: Never store encryption passwords in scripts or environment variables
 - The tool uses `InsecureIgnoreHostKey` for SSH - consider implementing proper host key verification for production
-- WireGuard traffic is encrypted, but the control plane (SSH) should be secured
-- Root SSH access is required on target hosts
+- WireGuard traffic is encrypted end-to-end
+- Root SSH access is required on target hosts - ensure SSH keys are properly secured
 
 ## Troubleshooting
 

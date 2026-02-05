@@ -30,28 +30,35 @@ func (m *Mesh) Deploy() error {
 		}
 
 		config := m.generateConfigForNode(node)
-		routes := m.collectRoutesForNode(node)
+		desiredRoutes := m.collectAllRoutesForNode(node)
 
 		currentConfig, err := wireguard.GetCurrentConfig(client, m.InterfaceName)
 		if err != nil {
 			fmt.Printf("  No existing config, applying fresh persistent configuration\n")
-			if err := wireguard.ApplyPersistentConfig(client, m.InterfaceName, config, routes); err != nil {
+			if err := wireguard.ApplyPersistentConfig(client, m.InterfaceName, config, desiredRoutes); err != nil {
 				return fmt.Errorf("failed to apply config to %s: %w", hostname, err)
 			}
 		} else {
 			diff := wireguard.CalculateDiff(currentConfig, wireguard.FullConfigToConfig(config))
 			if diff.HasChanges() {
 				fmt.Printf("  Applying changes with persistent configuration\n")
-				if err := wireguard.UpdatePersistentConfig(client, m.InterfaceName, config, routes, diff); err != nil {
+				if err := wireguard.UpdatePersistentConfig(client, m.InterfaceName, config, desiredRoutes, diff); err != nil {
 					return fmt.Errorf("failed to update config on %s: %w", hostname, err)
 				}
 			} else {
-				fmt.Printf("  No changes needed, ensuring persistent config is up to date\n")
-				configContent := wireguard.GenerateWgQuickConfig(config, routes)
-				configPath := fmt.Sprintf("/etc/wireguard/%s.conf", m.InterfaceName)
-				if err := client.WriteFile(configPath, []byte(configContent), 0600); err != nil {
-					fmt.Printf("  Warning: failed to update config file: %v\n", err)
-				}
+				fmt.Printf("  No WireGuard peer changes needed\n")
+			}
+
+			// Always check and sync routes
+			if err := m.syncRoutesForNode(client, node, desiredRoutes); err != nil {
+				return fmt.Errorf("failed to sync routes on %s: %w", hostname, err)
+			}
+
+			// Always ensure config file is up to date
+			configContent := wireguard.GenerateWgQuickConfig(config, desiredRoutes)
+			configPath := fmt.Sprintf("/etc/wireguard/%s.conf", m.InterfaceName)
+			if err := client.WriteFile(configPath, []byte(configContent), 0600); err != nil {
+				fmt.Printf("  Warning: failed to update config file: %v\n", err)
 			}
 		}
 
@@ -110,6 +117,57 @@ func (m *Mesh) collectRoutesForNode(node *Node) []ssh.RouteEntry {
 	}
 
 	return routes
+}
+
+func (m *Mesh) collectAllRoutesForNode(node *Node) []ssh.RouteEntry {
+	routes := make([]ssh.RouteEntry, 0)
+
+	// Add this node's own networks (direct routes, no gateway)
+	for _, network := range node.RoutableNetworks {
+		routes = append(routes, ssh.RouteEntry{
+			Network: network,
+			Gateway: "",
+		})
+	}
+
+	// Add routes to other nodes' networks (via their mesh IPs)
+	for peerHostname, peer := range m.Nodes {
+		if peerHostname == node.Hostname {
+			continue
+		}
+
+		for _, network := range peer.RoutableNetworks {
+			routes = append(routes, ssh.RouteEntry{
+				Network: network,
+				Gateway: peer.MeshIP.String(),
+			})
+		}
+	}
+
+	return routes
+}
+
+func (m *Mesh) syncRoutesForNode(client *ssh.Client, node *Node, desiredRoutes []ssh.RouteEntry) error {
+	currentRoutes, err := ssh.GetCurrentRoutes(client, m.InterfaceName)
+	if err != nil {
+		fmt.Printf("  Warning: could not get current routes, will try to add all: %v\n", err)
+		// If we can't get current routes, just try to add desired ones
+		for _, route := range desiredRoutes {
+			var cmd string
+			if route.Gateway != "" {
+				cmd = fmt.Sprintf("ip route add %s via %s dev %s || ip route replace %s via %s dev %s",
+					route.Network, route.Gateway, m.InterfaceName, route.Network, route.Gateway, m.InterfaceName)
+			} else {
+				cmd = fmt.Sprintf("ip route add %s dev %s || ip route replace %s dev %s",
+					route.Network, m.InterfaceName, route.Network, m.InterfaceName)
+			}
+			client.RunQuiet(cmd)
+		}
+		return nil
+	}
+
+	toAdd, toRemove := ssh.CalculateRouteDiff(currentRoutes, desiredRoutes)
+	return ssh.ApplyRouteDiff(client, m.InterfaceName, toAdd, toRemove)
 }
 
 func (m *Mesh) generateConfigForNode(node *Node) *WireGuardConfig {

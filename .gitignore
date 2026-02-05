@@ -15,6 +15,7 @@ wgmeshbuilder
 # Mesh state file (contains private keys!)
 mesh-state.json
 *.json.bak
+*.json
 
 # Go workspace file
 go.work

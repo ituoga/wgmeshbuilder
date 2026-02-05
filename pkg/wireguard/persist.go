@@ -87,7 +87,7 @@ func UpdatePersistentConfig(client *ssh.Client, iface string, config *FullConfig
 		return ApplyPersistentConfig(client, iface, config, routes)
 	}
 
-	fmt.Printf("  Applying online updates and updating persistent config\n")
+	fmt.Printf("  Applying online peer updates and updating persistent config\n")
 
 	configContent := GenerateWgQuickConfig(config, routes)
 	configPath := fmt.Sprintf("/etc/wireguard/%s.conf", iface)
@@ -100,14 +100,7 @@ func UpdatePersistentConfig(client *ssh.Client, iface string, config *FullConfig
 		return fmt.Errorf("failed to apply diff: %w", err)
 	}
 
-	// Update routes
-	for _, route := range routes {
-		cmd := fmt.Sprintf("ip route add %s via %s dev %s || ip route replace %s via %s dev %s",
-			route.Network, route.Gateway, iface, route.Network, route.Gateway, iface)
-		if err := client.RunQuiet(cmd); err != nil {
-			return fmt.Errorf("failed to update route for %s: %w", route.Network, err)
-		}
-	}
+	// Note: Routes are now synced separately in the deploy logic
 
 	return nil
 }
